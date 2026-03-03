@@ -43,10 +43,67 @@ QUIET_HOUR_DROP_PERCENT = 50        # More lenient during quiet hours
 ALERT_COOLDOWN_SEC = 300            # Don't re-alert same flight within 5 minutes
 ALERT_SOUND = True                  # Play macOS alert sound with notification
 
+# ─── OSINT — Social / News Monitoring ────────────────────────────────────────
+# Sources (all free, no API keys)
+OSINT_GOOGLE_NEWS_ENABLED = True
+OSINT_REDDIT_ENABLED = True
+OSINT_REDDIT_SUBREDDITS = ["worldnews", "dubai", "CombatFootage", "geopolitics"]
+
+# Polling (OSINT runs on same cycle as FR24)
+OSINT_DEDUP_WINDOW_SEC = 3600       # Don't re-alert same news item for 1 hour
+
+# Critical keywords — trigger CRITICAL (siren) alert
+OSINT_CRITICAL_KEYWORDS = [
+    "missile launch",
+    "missile strike",
+    "ballistic missile",
+    "cruise missile",
+    "air strike",
+    "airstrike",
+    "airspace closed",
+    "airport closed",
+    "airport attack",
+    "drone attack",
+    "drone strike",
+    "NOTAM closed",
+    "war declared",
+    "military strike",
+    "bombing",
+    "explosion",
+    "evacuate",
+    "civil defense",
+    "air defense",
+    "iron dome",
+    "intercepted missile",
+    "DXB closed",
+    "AUH closed",
+]
+
+# General keywords — trigger WARNING (ping) alert
+OSINT_KEYWORDS = [
+    "UAE threat",
+    "Dubai threat",
+    "Abu Dhabi threat",
+    "DXB divert",
+    "DXB emergency",
+    "NOTAM",
+    "airspace restriction",
+    "flight diversion",
+    "military activity",
+    "Houthi",
+    "escalation",
+    "conflict",
+    "tensions",
+    "sanctions",
+    "retaliation",
+    "ceasefire broken",
+    "no-fly zone",
+]
+
 # ─── Display ─────────────────────────────────────────────────────────────────
 BANNER = r"""
 ╔══════════════════════════════════════════════════════════╗
-║           PROJECT MIRAGE — UAE Airspace Monitor          ║
-║         FlightRadar24 Diversion Detection System         ║
+║             PROJECT MIRAGE — Threat Monitor              ║
+║      FlightRadar24 + OSINT Intelligence Platform         ║
 ╚══════════════════════════════════════════════════════════╝
 """

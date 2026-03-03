@@ -1,7 +1,8 @@
 """
-Project Mirage — macOS Desktop Notification Alerter
+Project Mirage — Alert Dispatcher
 
-Uses native osascript (AppleScript) for zero-dependency macOS notifications.
+Handles all alerting: macOS notifications + sound alerts (siren/ping).
+Uses native osascript for notifications, afplay for sounds.
 """
 
 import subprocess
@@ -11,14 +12,15 @@ from dataclasses import dataclass, field
 from enum import Enum
 
 from config import ALERT_COOLDOWN_SEC, ALERT_SOUND
+from sounds import ensure_sounds, play_siren, play_ping, stop_all
 
 logger = logging.getLogger("mirage.alerter")
 
 
 class Severity(Enum):
     INFO = "INFO"
-    WARNING = "WARNING"
-    CRITICAL = "CRITICAL"
+    WARNING = "⚠️  WARNING"
+    CRITICAL = "🚨 CRITICAL"
 
 
 @dataclass
@@ -27,15 +29,19 @@ class Alert:
     title: str
     message: str
     flight_id: str | None = None
+    source: str = "flight"          # "flight" or "osint"
     timestamp: float = field(default_factory=time.time)
 
 
 class Alerter:
-    """Handles alert dispatch with per-flight cooldowns."""
+    """Handles alert dispatch with per-flight cooldowns and sound alerts."""
 
     def __init__(self):
         self._cooldowns: dict[str, float] = {}  # flight_id -> last_alert_time
         self._alert_history: list[Alert] = []
+        # Generate sound files on init
+        if ALERT_SOUND:
+            ensure_sounds()
 
     def send(self, alert: Alert) -> bool:
         """
@@ -57,7 +63,15 @@ class Alerter:
         # Fire macOS notification
         self._notify_macos(alert)
 
+        # Play sound
+        if ALERT_SOUND:
+            self._play_sound(alert)
+
         return True
+
+    def shutdown(self):
+        """Stop any playing sounds."""
+        stop_all()
 
     def _log_alert(self, alert: Alert):
         """Print alert to terminal with color."""
@@ -74,17 +88,20 @@ class Alerter:
         print(f"  {alert.message}")
         print(f"{'━' * 60}{reset}\n")
 
+    def _play_sound(self, alert: Alert):
+        """Play appropriate sound based on severity."""
+        if alert.severity == Severity.CRITICAL:
+            play_siren(repeat=3)
+        else:
+            play_ping()
+
     def _notify_macos(self, alert: Alert):
         """Send a native macOS notification via osascript."""
-        sound_clause = 'sound name "Funk"' if ALERT_SOUND else ""
-        if alert.severity == Severity.CRITICAL:
-            sound_clause = 'sound name "Sosumi"'
-
+        # No built-in sound — we handle sounds ourselves via afplay
         script = (
             f'display notification "{self._escape(alert.message)}" '
             f'with title "Project Mirage" '
             f'subtitle "{self._escape(alert.severity.value + ": " + alert.title)}" '
-            f'{sound_clause}'
         )
 
         try:
