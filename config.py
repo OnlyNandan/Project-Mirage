@@ -24,7 +24,7 @@ STARTUP_GRACE_POLLS = 3         # Number of initial polls before detection activ
                                 # (lets us build a baseline first)
 
 # ─── Diversion Detection — Individual Flights ────────────────────────────────
-HEADING_CHANGE_THRESHOLD_DEG = 60   # Flag if heading changes > this in one poll cycle
+HEADING_CHANGE_THRESHOLD_DEG = 90   # Flag if heading changes > this in one poll cycle (raised — 60 was too sensitive)
 MIN_TRACK_TIME_SEC = 60             # Ignore flights seen for less than this
 MAX_HISTORY_SNAPSHOTS = 40          # Keep last N snapshots per flight (~10 min at 15s)
 ALTITUDE_FLOOR_FT = 5000           # Ignore ground-level traffic (taxiing, etc.)
@@ -66,7 +66,29 @@ APPROACH_MIN_CLOSING_SNAPS = 3      # Must be closing in for at least 3 snapshot
 APPROACH_MIN_SPEED_KT = 150         # Must be at flight speed (not parked/taxiing)
 ABORT_HEADING_REVERSAL_DEG = 90     # Turn-away threshold (heading change toward exit)
 ABORT_DIST_INCREASE_NM = 2.0        # Must be moving away from airport by at least this
-ABORT_CONCURRENT_THRESHOLD = 2      # 2+ aborts at same time = almost certainly attack
+ABORT_CONCURRENT_THRESHOLD = 2      # 2+ aborts in the wave window = SIREN
+ABORT_WAVE_WINDOW_SEC = 180          # Time window to count concurrent aborts (3 min)
+                                     # One abort is a normal go-around. Two+ in 3 min = attack.
+
+# ─── Siren Rules ─────────────────────────────────────────────────────────────
+# Siren is ONLY for genuine emergencies. Everything else is a ping or silent.
+# SIREN triggers:
+#   1. Abort wave — 2+ approach aborts within 3 minutes
+#   2. CORRELATED signal — 1+ abort AND 1+ holding at same time (the real pattern!)
+#   3. Mass holding — 5+ flights circling (airspace crisis)
+#   4. Airspace emptying — below critical or big % drop
+#   5. Squawk 7500 (hijack) or 7700 (general emergency)
+# PING (warning) triggers:
+#   - Single approach abort with no holding (go-arounds are normal)
+#   - GPS spoofing indicators
+#   - Individual diversions
+#   - Mass holding 3-4 flights
+# SILENT (log only):
+#   - Single/few flights holding (1-2)
+#   - Heading changes
+#   - Squawk 7600 (radio failure, not an emergency)
+MASS_HOLDING_SIREN_THRESHOLD = 5     # 5+ flights holding = airspace crisis (siren)
+MASS_HOLDING_WARN_THRESHOLD = 3      # 3-4 flights holding = ping warning
 
 # ML model feedback
 MODEL_DATA_FILE = "model_data.json"  # Stores labeled events for learning

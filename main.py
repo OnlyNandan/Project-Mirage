@@ -1,7 +1,11 @@
 #!/usr/bin/env python3
 """
 Project Mirage — UAE Threat Monitor
-Unified monitoring: FlightRadar24 airspace + OSINT (Google News, Reddit).
+FlightRadar24 approach-abort detection with ML feedback learning.
+
+The core idea: track planes approaching DXB — if they turn around
+instead of landing, it's likely a missile/attack. SIREN fires.
+After 5 minutes, the system asks "was there a boom?" so the model learns.
 
 Usage:
     python main.py              # Normal mode
@@ -16,7 +20,7 @@ import logging
 import signal
 import sys
 import time
-import threading
+import select
 from datetime import datetime, timezone, timedelta
 
 from FlightRadar24.api import FlightRadar24API
@@ -26,13 +30,12 @@ from config import (
     POLL_INTERVAL_SEC,
     BANNER,
     STARTUP_GRACE_POLLS,
-    OSINT_GOOGLE_NEWS_ENABLED,
-    OSINT_REDDIT_ENABLED,
+    FEEDBACK_DELAY_SEC,
 )
 from tracker import Tracker
 from detector import Detector
 from alerter import Alerter, Alert, Severity
-from osint import OSINTMonitor
+from approach_model import ApproachAbortModel
 from sounds import ensure_sounds, stop_all
 
 # ─── Logging Setup ───────────────────────────────────────────────────────────
@@ -42,7 +45,6 @@ def setup_logging(verbose: bool = False):
     fmt = "%(asctime)s │ %(name)-18s │ %(levelname)-7s │ %(message)s"
     datefmt = "%H:%M:%S"
     logging.basicConfig(level=level, format=fmt, datefmt=datefmt)
-    # Silence noisy urllib3
     logging.getLogger("urllib3").setLevel(logging.WARNING)
 
 
@@ -66,6 +68,58 @@ signal.signal(signal.SIGINT, _signal_handler)
 signal.signal(signal.SIGTERM, _signal_handler)
 
 
+# ─── Feedback Prompter ──────────────────────────────────────────────────────
+
+def _ask_feedback_nonblocking(model: ApproachAbortModel):
+    """
+    Check if any abort events need user feedback (5 min after siren).
+    Uses non-blocking stdin check so it doesn't interrupt monitoring.
+    """
+    pending = model.get_pending_feedback()
+    if not pending:
+        return
+
+    for event in pending:
+        age_min = (time.time() - event.timestamp) / 60
+        print(f"\n\033[95m{'━' * 60}")
+        print(f"  🔔 FEEDBACK NEEDED ({age_min:.0f} min ago)")
+        print(f"  {event.callsign} aborted approach to {event.airport}")
+        print(f"  Score: {event.score:.1f} | Distance: {event.abort_distance_nm:.0f}nm")
+        print(f"  Was there a boom/attack? [y/n/s(kip)]: ", end="", flush=True)
+        print(f"\033[0m", end="", flush=True)
+
+        # Non-blocking read with 30-second timeout
+        answer = _read_with_timeout(30)
+
+        if answer is None:
+            print("\n  (no response — will ask again next cycle)")
+            continue
+
+        answer = answer.strip().lower()
+        if answer in ("y", "yes"):
+            model.submit_feedback(event, was_attack=True)
+            print(f"\033[91m  ✓ Marked as CONFIRMED ATTACK — model weights updated\033[0m")
+        elif answer in ("n", "no"):
+            model.submit_feedback(event, was_attack=False)
+            print(f"\033[92m  ✓ Marked as FALSE POSITIVE — model weights updated\033[0m")
+        elif answer in ("s", "skip"):
+            model.dismiss_pending(event)
+            print(f"  ✓ Skipped (treated as false positive)")
+        else:
+            print(f"  ✓ Unrecognized '{answer}' — skipping for now")
+
+
+def _read_with_timeout(timeout_sec: int) -> str | None:
+    """Read a line from stdin with a timeout. Returns None if no input."""
+    try:
+        ready, _, _ = select.select([sys.stdin], [], [], timeout_sec)
+        if ready:
+            return sys.stdin.readline()
+    except (ValueError, OSError):
+        pass
+    return None
+
+
 # ─── Main Loop ───────────────────────────────────────────────────────────────
 
 def run(interval: int = POLL_INTERVAL_SEC, verbose: bool = False, sound: bool = True):
@@ -84,65 +138,33 @@ def run(interval: int = POLL_INTERVAL_SEC, verbose: bool = False, sound: bool = 
     fr = FlightRadar24API()
     tracker = Tracker()
     alerter = Alerter()
-    detector = Detector(tracker, alerter)
-    osint = OSINTMonitor()
+    model = ApproachAbortModel()
+    detector = Detector(tracker, alerter, model)
 
     # Generate sound files upfront
     if sound:
         ensure_sounds()
 
-    sources = []
-    if True:  # FR24 always on
-        sources.append("FlightRadar24")
-    if OSINT_GOOGLE_NEWS_ENABLED:
-        sources.append("Google News")
-    if OSINT_REDDIT_ENABLED:
-        sources.append("Reddit")
-
-    print(f"  Sources: {' + '.join(sources)}")
+    print(f"  Source: FlightRadar24")
     print(f"  Monitoring UAE airspace (bounds: {UAE_BOUNDS_STR})")
     print(f"  Poll interval: {interval}s")
-    print(f"  Sound alerts: {'ON — siren (flights only) / ping (warnings)' if sound else 'OFF'}")
-    print(f"  Grace period: {STARTUP_GRACE_POLLS} polls before flight detection activates")
-    print(f"  Detection: diversions, holding patterns, GPS spoofing, airspace emptying")
-    print(f"  OSINT: news/social monitoring (ping only, no siren)")
+    print(f"  Sound: {'ON — siren on approach-abort / ping on warnings' if sound else 'OFF'}")
+    print(f"  Grace period: {STARTUP_GRACE_POLLS} polls before detection activates")
+    print(f"  Detection: approach-abort (ML) + holding + GPS spoofing + airspace")
+    print(f"  Feedback: system asks you after {FEEDBACK_DELAY_SEC//60}min — was there a boom?")
+    print(f"  Model: {model.stats}")
     print(f"  Press Ctrl+C to stop\n")
     print("─" * 60)
 
     consecutive_fr24_errors = 0
     max_consecutive_errors = 5
 
-    # OSINT runs in a background thread so it never blocks FR24 polling
-    osint_results: list = []       # Shared list for thread results
-    osint_lock = threading.Lock()
-    osint_new_count = 0            # New items from last completed OSINT poll
-
-    def _osint_worker():
-        """Background worker: polls OSINT sources and deposits results."""
-        nonlocal osint_new_count
-        while _running:
-            try:
-                items = osint.poll()
-                with osint_lock:
-                    osint_results.extend(items)
-                    osint_new_count = len(items)
-            except Exception as e:
-                logger.warning(f"OSINT poll error: {e}")
-            # OSINT polls on same interval, offset slightly
-            for _ in range(interval):
-                if not _running:
-                    break
-                time.sleep(1)
-
-    osint_thread = threading.Thread(target=_osint_worker, daemon=True, name="osint")
-    osint_thread.start()
-
     while _running:
         cycle_start = time.time()
         now_str = datetime.now(UAE_TZ).strftime("%H:%M:%S")
 
         # ═══════════════════════════════════════════════════════════════
-        # PART 1: FlightRadar24 Airspace Monitoring
+        # PART 1: FlightRadar24 Airspace + Approach-Abort Detection
         # ═══════════════════════════════════════════════════════════════
         try:
             raw_flights = fr.get_flights(bounds=UAE_BOUNDS_STR)
@@ -155,6 +177,8 @@ def run(interval: int = POLL_INTERVAL_SEC, verbose: bool = False, sound: bool = 
             count = tracker.active_count
             if count == 0:
                 count_color = "\033[91m"  # Red
+            elif detector.abort_count > 0:
+                count_color = "\033[91m"  # Red — aborts happening!
             elif detector.baseline and count < detector.baseline * 0.8:
                 count_color = "\033[93m"  # Yellow
             else:
@@ -165,8 +189,7 @@ def run(interval: int = POLL_INTERVAL_SEC, verbose: bool = False, sound: bool = 
 
             print(
                 f"  [{now_str} UAE] {count_color}✈ {count}\033[0m flights"
-                f"{new_str}{exit_str} │ {detector.status_summary}",
-                end=""
+                f"{new_str}{exit_str} │ {detector.status_summary}"
             )
 
         except KeyboardInterrupt:
@@ -174,7 +197,7 @@ def run(interval: int = POLL_INTERVAL_SEC, verbose: bool = False, sound: bool = 
         except Exception as e:
             consecutive_fr24_errors += 1
             logger.error(f"FR24 error ({consecutive_fr24_errors}/{max_consecutive_errors}): {e}")
-            print(f"  [{now_str} UAE] \033[91m✈ FR24 ERROR\033[0m", end="")
+            print(f"  [{now_str} UAE] \033[91m✈ FR24 ERROR\033[0m ({consecutive_fr24_errors}x)")
 
             if consecutive_fr24_errors >= max_consecutive_errors:
                 alerter.send(Alert(
@@ -186,29 +209,9 @@ def run(interval: int = POLL_INTERVAL_SEC, verbose: bool = False, sound: bool = 
                 ))
 
         # ═══════════════════════════════════════════════════════════════
-        # PART 2: Process OSINT results (from background thread)
+        # PART 2: Check for pending user feedback (was there a boom?)
         # ═══════════════════════════════════════════════════════════════
-        with osint_lock:
-            pending_items = list(osint_results)
-            osint_results.clear()
-            new_osint = osint_new_count
-
-        for item in pending_items:
-            # OSINT never triggers siren — cap at WARNING (ping only)
-            severity = Severity.WARNING
-            alerter.send(Alert(
-                severity=severity,
-                title=f"OSINT [{item.source}]: {', '.join(item.matched_keywords[:3])}",
-                message=f"{item.title[:120]}\n{item.url}",
-                flight_id=item.dedup_key,
-                source="osint",
-            ))
-
-        # Print OSINT status on same line
-        osint_str = f" │ \033[96m📡 OSINT: {osint.total_items} hits\033[0m"
-        if new_osint > 0:
-            osint_str += f" (+{new_osint} new!)"
-        print(osint_str)
+        _ask_feedback_nonblocking(model)
 
         # ═══════════════════════════════════════════════════════════════
         # Sleep until next cycle
@@ -224,8 +227,8 @@ def run(interval: int = POLL_INTERVAL_SEC, verbose: bool = False, sound: bool = 
     print(f"  Session summary:")
     print(f"    Polls completed: {tracker.poll_count}")
     print(f"    Flights tracked: {tracker.total_tracked}")
-    print(f"    OSINT items:     {osint.total_items}")
     print(f"    Alerts fired:    {len(alerter.history)}")
+    print(f"    Model:           {model.stats}")
     print("─" * 60)
     print("  Goodbye. ✈️\n")
 
@@ -248,15 +251,15 @@ def test_alert():
     alerter.send(Alert(
         severity=Severity.WARNING,
         title="Test: Warning Ping",
-        message="EK203 diverted from DXB — this is a test warning (ping sound).",
+        message="EK203 heading change detected — this is a test warning.",
         flight_id="test_flight",
     ))
     time.sleep(2)
 
     alerter.send(Alert(
         severity=Severity.CRITICAL,
-        title="Test: CRITICAL SIREN",
-        message="UAE airspace critical — SIREN SOUND TEST",
+        title="Test: APPROACH ABORT SIREN",
+        message="EK203 aborted approach to DXB — SIREN TEST",
         flight_id="test_critical",
     ))
 
@@ -266,8 +269,7 @@ def test_alert():
 
     print("\n  ✓ You should have heard:")
     print("    - 2x ping sounds (INFO + WARNING)")
-    print("    - 1x siren sound (CRITICAL)")
-    print("  Check macOS Notification Center for 3 test alerts.")
+    print("    - 1x siren sound (CRITICAL — approach abort)")
     print("  If no sound, check System Settings → Sound → Alert volume.\n")
 
 
@@ -275,7 +277,7 @@ def test_alert():
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Project Mirage — UAE Threat Monitor (FlightRadar24 + OSINT)",
+        description="Project Mirage — UAE Threat Monitor (FlightRadar24 Approach-Abort ML)",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
