@@ -29,6 +29,21 @@ MIN_TRACK_TIME_SEC = 60             # Ignore flights seen for less than this
 MAX_HISTORY_SNAPSHOTS = 40          # Keep last N snapshots per flight (~10 min at 15s)
 ALTITUDE_FLOOR_FT = 5000           # Ignore ground-level traffic (taxiing, etc.)
 
+# ─── Holding Pattern Detection ───────────────────────────────────────────────
+# Detect flights circling (cumulative heading change > 360° over recent history)
+# This is what happens when flights can't land (airspace threat, attack, etc.)
+HOLDING_CUMULATIVE_DEG = 360        # Total heading rotation to flag as holding
+HOLDING_MIN_SNAPSHOTS = 8           # Min snapshots to check (avoids noise)
+HOLDING_MAX_ALTITUDE_FT = 20000     # Holding usually below FL200
+HOLDING_MAX_DISTANCE_NM = 60        # Must be within 60nm of a UAE airport
+
+# ─── GPS Spoofing Detection ──────────────────────────────────────────────────
+# GPS spoofing is active in the Middle East — detect anomalies
+SPOOF_MAX_SPEED_KT = 700            # Faster than this between polls = teleport (spoofing)
+SPOOF_HEADING_MISMATCH_DEG = 90     # Heading vs actual movement vector differ > this
+SPOOF_CLUSTER_RADIUS_DEG = 0.01     # ~1km — multiple flights at same fake position
+SPOOF_CLUSTER_MIN_FLIGHTS = 3       # Min flights in cluster to flag
+
 # ─── Diversion Detection — Airspace Emptying ─────────────────────────────────
 BASELINE_WINDOW = 10                # Rolling average over last N polls
 FLIGHT_COUNT_DROP_PERCENT = 30      # Alert if count drops > this % below baseline
@@ -43,67 +58,24 @@ QUIET_HOUR_DROP_PERCENT = 50        # More lenient during quiet hours
 ALERT_COOLDOWN_SEC = 300            # Don't re-alert same flight within 5 minutes
 ALERT_SOUND = True                  # Play macOS alert sound with notification
 
-# ─── OSINT — Social / News Monitoring ────────────────────────────────────────
-# Sources (all free, no API keys)
-OSINT_GOOGLE_NEWS_ENABLED = True
-OSINT_REDDIT_ENABLED = True
-OSINT_REDDIT_SUBREDDITS = ["worldnews", "dubai", "CombatFootage", "geopolitics"]
+# ─── Approach Abort Detection (the core ML model) ────────────────────────────
+# The pattern: plane is on approach to DXB → suddenly turns around → exits UAE
+# That means a missile/attack. This is the primary siren trigger.
+APPROACH_MAX_DIST_NM = 80           # Consider "on approach" if within 80nm of airport
+APPROACH_MIN_CLOSING_SNAPS = 3      # Must be closing in for at least 3 snapshots
+APPROACH_MIN_SPEED_KT = 150         # Must be at flight speed (not parked/taxiing)
+ABORT_HEADING_REVERSAL_DEG = 90     # Turn-away threshold (heading change toward exit)
+ABORT_DIST_INCREASE_NM = 2.0        # Must be moving away from airport by at least this
+ABORT_CONCURRENT_THRESHOLD = 2      # 2+ aborts at same time = almost certainly attack
 
-# Polling (OSINT runs on same cycle as FR24)
-OSINT_DEDUP_WINDOW_SEC = 3600       # Don't re-alert same news item for 1 hour
-
-# Critical keywords — trigger CRITICAL (siren) alert
-OSINT_CRITICAL_KEYWORDS = [
-    "missile launch",
-    "missile strike",
-    "ballistic missile",
-    "cruise missile",
-    "air strike",
-    "airstrike",
-    "airspace closed",
-    "airport closed",
-    "airport attack",
-    "drone attack",
-    "drone strike",
-    "NOTAM closed",
-    "war declared",
-    "military strike",
-    "bombing",
-    "explosion",
-    "evacuate",
-    "civil defense",
-    "air defense",
-    "iron dome",
-    "intercepted missile",
-    "DXB closed",
-    "AUH closed",
-]
-
-# General keywords — trigger WARNING (ping) alert
-OSINT_KEYWORDS = [
-    "UAE threat",
-    "Dubai threat",
-    "Abu Dhabi threat",
-    "DXB divert",
-    "DXB emergency",
-    "NOTAM",
-    "airspace restriction",
-    "flight diversion",
-    "military activity",
-    "Houthi",
-    "escalation",
-    "conflict",
-    "tensions",
-    "sanctions",
-    "retaliation",
-    "ceasefire broken",
-    "no-fly zone",
-]
+# ML model feedback
+MODEL_DATA_FILE = "model_data.json"  # Stores labeled events for learning
+FEEDBACK_DELAY_SEC = 300             # Ask user 5 min after siren: "was there a boom?"
 
 # ─── Display ─────────────────────────────────────────────────────────────────
 BANNER = r"""
 ╔══════════════════════════════════════════════════════════╗
 ║             PROJECT MIRAGE — Threat Monitor              ║
-║      FlightRadar24 + OSINT Intelligence Platform         ║
+║       FlightRadar24 Approach-Abort ML Detection          ║
 ╚══════════════════════════════════════════════════════════╝
 """

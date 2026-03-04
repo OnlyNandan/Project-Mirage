@@ -28,6 +28,8 @@ from config import (
     OSINT_REDDIT_ENABLED,
     OSINT_REDDIT_SUBREDDITS,
     OSINT_DEDUP_WINDOW_SEC,
+    OSINT_MAX_ARTICLE_AGE_MIN,
+    OSINT_MAX_SEVERITY,
 )
 
 logger = logging.getLogger("mirage.osint")
@@ -43,8 +45,9 @@ class IntelItem:
     url: str
     snippet: str
     matched_keywords: list[str]
-    is_critical: bool     # True if critical keywords matched
+    is_critical: bool     # True if critical keywords matched (note: severity may be capped)
     timestamp: float = field(default_factory=time.time)
+    pub_time: float | None = None  # Article publication time (epoch) if available
 
     @property
     def dedup_key(self) -> str:
@@ -146,6 +149,9 @@ class OSINTMonitor:
     def _parse_google_rss(self, xml_content: str) -> list[IntelItem]:
         """Parse Google News RSS XML into IntelItems."""
         items = []
+        now = time.time()
+        max_age_sec = OSINT_MAX_ARTICLE_AGE_MIN * 60
+
         try:
             root = ET.fromstring(xml_content)
         except ET.ParseError as e:
@@ -156,6 +162,13 @@ class OSINTMonitor:
             title = item_el.findtext("title", "")
             link = item_el.findtext("link", "")
             desc = item_el.findtext("description", "")
+            pub_date = item_el.findtext("pubDate", "")
+
+            # Check article freshness — skip old articles
+            pub_epoch = self._parse_rfc2822(pub_date)
+            if pub_epoch and (now - pub_epoch) > max_age_sec:
+                logger.debug(f"Skipping old article ({(now - pub_epoch)/60:.0f}m): {title[:60]}")
+                continue
 
             # Clean HTML from description
             desc_clean = re.sub(r"<[^>]+>", "", html.unescape(desc))
@@ -170,9 +183,22 @@ class OSINTMonitor:
                     snippet=desc_clean[:200],
                     matched_keywords=matched,
                     is_critical=is_critical,
+                    pub_time=pub_epoch,
                 ))
 
         return items
+
+    @staticmethod
+    def _parse_rfc2822(date_str: str) -> float | None:
+        """Parse RFC 2822 date (from RSS) to epoch. Returns None on failure."""
+        if not date_str:
+            return None
+        try:
+            from email.utils import parsedate_to_datetime
+            dt = parsedate_to_datetime(date_str)
+            return dt.timestamp()
+        except Exception:
+            return None
 
     # ── Reddit ───────────────────────────────────────────────────────────────
 

@@ -89,8 +89,13 @@ class Alerter:
         print(f"{'━' * 60}{reset}\n")
 
     def _play_sound(self, alert: Alert):
-        """Play appropriate sound based on severity."""
-        if alert.severity == Severity.CRITICAL:
+        """Play appropriate sound based on severity and source.
+        
+        SIREN (CRITICAL) only fires for flight-related alerts:
+          - Flight diversions, holding patterns, GPS spoofing, airspace emptying
+        OSINT alerts are capped at ping (WARNING) even if keywords are critical.
+        """
+        if alert.severity == Severity.CRITICAL and alert.source in ("flight", "system"):
             play_siren(repeat=3)
         else:
             play_ping()

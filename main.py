@@ -102,8 +102,10 @@ def run(interval: int = POLL_INTERVAL_SEC, verbose: bool = False, sound: bool = 
     print(f"  Sources: {' + '.join(sources)}")
     print(f"  Monitoring UAE airspace (bounds: {UAE_BOUNDS_STR})")
     print(f"  Poll interval: {interval}s")
-    print(f"  Sound alerts: {'ON — siren (critical) / ping (warning)' if sound else 'OFF'}")
+    print(f"  Sound alerts: {'ON — siren (flights only) / ping (warnings)' if sound else 'OFF'}")
     print(f"  Grace period: {STARTUP_GRACE_POLLS} polls before flight detection activates")
+    print(f"  Detection: diversions, holding patterns, GPS spoofing, airspace emptying")
+    print(f"  OSINT: news/social monitoring (ping only, no siren)")
     print(f"  Press Ctrl+C to stop\n")
     print("─" * 60)
 
@@ -192,7 +194,8 @@ def run(interval: int = POLL_INTERVAL_SEC, verbose: bool = False, sound: bool = 
             new_osint = osint_new_count
 
         for item in pending_items:
-            severity = Severity.CRITICAL if item.is_critical else Severity.WARNING
+            # OSINT never triggers siren — cap at WARNING (ping only)
+            severity = Severity.WARNING
             alerter.send(Alert(
                 severity=severity,
                 title=f"OSINT [{item.source}]: {', '.join(item.matched_keywords[:3])}",
